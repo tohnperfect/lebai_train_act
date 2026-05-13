@@ -8,9 +8,13 @@ The repository is a three-notebook pipeline: convert raw collection logs → tra
 
 | Path | Purpose |
 |---|---|
-| [convert_alllog_to_lerobot.ipynb](convert_alllog_to_lerobot.ipynb) | Convert raw `save_state_img.py` logs into a [LeRobot](https://github.com/huggingface/lerobot) dataset. |
-| [act_training.ipynb](act_training.ipynb) | Train an ACT policy on that dataset; writes checkpoints to `./checkpoints/`. |
+| [convert_alllog_to_lerobot.ipynb](convert_alllog_to_lerobot.ipynb) | Local notebook: convert raw `save_state_img.py` logs into a [LeRobot](https://github.com/huggingface/lerobot) dataset. |
+| [act_training.ipynb](act_training.ipynb) | Local notebook: train an ACT policy on that dataset; writes checkpoints to `./checkpoints/`. |
 | [act_inference.ipynb](act_inference.ipynb) | Load the final checkpoint and drive the arm in a real-time 10 Hz control loop. |
+| [convert_local.py](convert_local.py) / [verify_local.py](verify_local.py) | Headless command-line converter + verifier — same logic as the notebook, used to produce `result/` for upload to Colab. |
+| [convert_alllog_to_lerobot_colab.ipynb](convert_alllog_to_lerobot_colab.ipynb) | Colab variant of the converter (reads from Drive). |
+| [act_training_colab.ipynb](act_training_colab.ipynb) | Colab variant of the trainer (extracts dataset from Drive tarball, saves checkpoints to Drive). |
+| [recover_lerobot_dataset.py](recover_lerobot_dataset.py) | One-off recovery for older LeRobot dataset layouts (legacy; v0.5+ format is different — see Troubleshooting). |
 | [Data/](Data/) | Raw demonstrations (gitignored). 10 logs of "put the duck in the bowl", ~9.2k frames at 10 Hz. |
 | [CLAUDE.md](CLAUDE.md) | Notes for the Claude Code assistant — also useful as a quick technical reference. |
 
@@ -129,22 +133,45 @@ The pre-loop **safety checklist** is non-optional:
 3. Pendant velocity factor turned **down** for the first runs.
 4. Start the robot in a pose similar to one of the training episodes' first frames.
 
-## Running on Google Colab
+## Running on Google Colab (recommended for training)
 
-Steps 1 and 2 can run on Colab; Step 3 cannot (the inference notebook needs LAN access to the Lebai SDK and camera service). Two Colab-ready notebooks read and write everything via Google Drive so the converted dataset and checkpoints survive runtime resets:
+Inference (Step 3) cannot run on Colab — it needs LAN access to the Lebai SDK and camera service. For Steps 1 and 2, the **recommended flow is local-convert + Colab-train**: conversion writes thousands of small files which is slow and corruption-prone on Drive, while training writes a few large checkpoints which Drive handles well.
 
-- [convert_alllog_to_lerobot_colab.ipynb](convert_alllog_to_lerobot_colab.ipynb)
-- [act_training_colab.ipynb](act_training_colab.ipynb)
+### 1. Convert locally
 
-Setup:
+From the repo root (Python 3.10+):
 
-1. Upload `Data/` to Drive at `MyDrive/Lebai_train_ACT/Data/` (the `Data/` folder is gitignored, so it isn't pulled by `git clone`).
-2. Open the two notebooks in Colab. Set runtime to **GPU** for the training notebook.
-3. Run the converter first, then the trainer. Each notebook mounts Drive in cell 2 and sets `HF_LEROBOT_HOME` to a shared `MyDrive/Lebai_train_ACT/lerobot_cache/` so the trainer finds the dataset the converter wrote.
+```bash
+python3.13 -m venv .venv               # or any Python ≥3.10
+.venv/bin/pip install lerobot pandas opencv-python tqdm
+.venv/bin/python convert_local.py      # reads Data/, writes result/
+.venv/bin/python verify_local.py       # reads result/ in a fresh process
+```
 
-Checkpoints land in `MyDrive/Lebai_train_ACT/checkpoints/act_run01/`. The training notebook's `RESUME = True` flag picks up from the latest `step_*` folder, so a Colab disconnect mid-training is recoverable.
+`verify_local.py` is intentionally a separate process — `lerobot 0.5.x` has an async meta-parquet writer whose flush lags `save_episode()`, producing a misleading `Parquet magic bytes not found in footer` error if you try to re-open the dataset in the same Python process the converter ran in.
 
-Once `final/` is saved on Drive, download it to a machine on the robot's LAN and point [act_inference.ipynb](act_inference.ipynb)'s `CHECKPOINT_PATH` at it.
+You should see `Dataset OK.` and `10 episodes, 9246 frames` (for the bundled data).
+
+### 2. Pack and upload to Drive
+
+```bash
+cd result && tar -czf lebai_duck_pick.tar.gz local/lebai_duck_pick
+# ~3.5 GB; upload via drag-drop to MyDrive/Lebai_train_ACT/
+```
+
+### 3. Train on Colab
+
+Open [act_training_colab.ipynb](act_training_colab.ipynb), set runtime to **GPU**, run all cells. The paths cell:
+
+- Extracts `MyDrive/Lebai_train_ACT/lebai_duck_pick.tar.gz` to `/content/lerobot_cache/` (Colab SSD, fast).
+- Sets `HF_LEROBOT_HOME` to the local SSD path.
+- Points `CHECKPOINT_DIR` at `MyDrive/Lebai_train_ACT/checkpoints/act_run01/` on Drive (persists across runtime resets).
+
+`RESUME = True` (cell 7) picks up from the latest `step_*` checkpoint, so a Colab disconnect mid-training is recoverable. Once `final/` is saved on Drive, download it to a machine on the robot's LAN and point [act_inference.ipynb](act_inference.ipynb)'s `CHECKPOINT_PATH` at it.
+
+### Alternative: Drive-only Colab flow
+
+[convert_alllog_to_lerobot_colab.ipynb](convert_alllog_to_lerobot_colab.ipynb) does conversion entirely inside Colab (reads `Data/` from Drive, writes the dataset to Drive). Slower and more fragile due to the many-small-writes corruption risk — kept around for cases where you'd rather not have a local Python environment, but use the local converter when you can.
 
 ## Switching to your own data
 

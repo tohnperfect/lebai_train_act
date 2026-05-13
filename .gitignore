@@ -1,2 +1,6 @@
 Data/
 .DS_Store
+.venv/
+result/
+checkpoints/
+.vscode/
