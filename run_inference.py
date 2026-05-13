@@ -141,7 +141,11 @@ def build_observation(policy, cam, lebai, base_cid, wrist_cid, expected_keys, de
 _last_gripper_sent = None
 
 def send_action(action_np, lebai):
-    """First 6 dims = joint targets (rad). Last dim (if 7) = gripper amplitude."""
+    """First 6 dims = joint targets (rad). Last dim (if 7) = gripper amplitude.
+
+    Returns (gripper_amp, gripper_sent_flag) so the caller can report whether
+    the gripper command was sent or rate-limited.
+    """
     global _last_gripper_sent
 
     target_joints = [float(x) for x in action_np[:6]]
@@ -152,12 +156,16 @@ def send_action(action_np, lebai):
         BLEND_RADIUS,
     )
 
+    gripper_amp = None
+    gripper_sent = False
     if len(action_np) >= 7:
-        amp = float(np.clip(action_np[6], 0.0, 100.0))
+        gripper_amp = float(np.clip(action_np[6], 0.0, 100.0))
         if (_last_gripper_sent is None
-                or abs(amp - _last_gripper_sent) > GRIPPER_THRESHOLD):
-            lebai.set_claw(GRIPPER_FORCE, amp)
-            _last_gripper_sent = amp
+                or abs(gripper_amp - _last_gripper_sent) > GRIPPER_THRESHOLD):
+            lebai.set_claw(GRIPPER_FORCE, gripper_amp)
+            _last_gripper_sent = gripper_amp
+            gripper_sent = True
+    return gripper_amp, gripper_sent
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +183,8 @@ def parse_args():
                    help=f"Hard time limit on the control loop in seconds (default: {DEFAULT_DURATION_S})")
     p.add_argument("--dry-run", action="store_true",
                    help="Predict one action and print it, but do NOT send to the robot.")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="Print current state, predicted action, and delta every tick.")
     return p.parse_args()
 
 
@@ -274,17 +284,31 @@ def main():
             with torch.inference_mode():
                 action = policy.select_action(obs)
             action_np = action[0].cpu().numpy()
+            state_np = obs["observation.state"][0].cpu().numpy()
 
-            send_action(action_np, lebai)
+            gripper_amp, gripper_sent = send_action(action_np, lebai)
 
             step += 1
-            if step % 10 == 0:
+            log_now = args.verbose or (step % 10 == 0)
+            if log_now:
                 loop_ms = (time.time() - loop_t) * 1000
-                msg = (f"  t={loop_t - t_start:5.1f}s  step={step:4d}  "
-                       f"loop={loop_ms:.0f}ms  j={np.round(action_np[:6], 2)}")
-                if len(action_np) >= 7:
-                    msg += f"  g={action_np[6]:.0f}"
-                print(msg)
+                if args.verbose:
+                    delta = action_np - state_np
+                    print(f"  t={loop_t - t_start:5.1f}s  step={step:4d}  loop={loop_ms:.0f}ms")
+                    print(f"    state : {np.round(state_np[:6], 3)}    "
+                          f"gripper={state_np[6]:5.1f}" if len(state_np) >= 7
+                          else f"    state : {np.round(state_np[:6], 3)}")
+                    print(f"    action: {np.round(action_np[:6], 3)}    "
+                          f"gripper={gripper_amp:5.1f} {'(SENT)' if gripper_sent else '(rate-limited)'}"
+                          if gripper_amp is not None else
+                          f"    action: {np.round(action_np[:6], 3)}")
+                    print(f"    delta : {np.round(delta[:6], 4)}")
+                else:
+                    msg = (f"  t={loop_t - t_start:5.1f}s  step={step:4d}  "
+                           f"loop={loop_ms:.0f}ms  j={np.round(action_np[:6], 2)}")
+                    if len(action_np) >= 7:
+                        msg += f"  g={action_np[6]:.0f}"
+                    print(msg)
 
             next_tick += PERIOD_S
             sleep_for = next_tick - time.time()
