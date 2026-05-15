@@ -140,17 +140,19 @@ def build_observation(policy, cam, lebai, base_cid, wrist_cid, expected_keys, de
 
 _last_gripper_sent = None
 
-def resolve_targets(action_np, state_np, action_mode):
+def resolve_targets(action_np, state_np, action_mode, action_delta_scale=1.0):
     """Convert a policy action into absolute joint targets and (optionally) a gripper amplitude.
 
     action_mode = 'absolute' -> action[0..5] are the joint targets themselves (rad).
-    action_mode = 'relative' -> action[0..5] are per-tick deltas; add to current state.
-    Gripper (action[6]) is always absolute (0–100).
+    action_mode = 'relative' -> action[0..5] are SCALED per-tick deltas. Divide by
+                                action_delta_scale (matches converter's ACTION_DELTA_SCALE),
+                                then add to current state to get absolute targets.
+    Gripper (action[6]) is always absolute (0–100), never scaled.
     """
     if action_mode == "absolute":
         target_joints = [float(action_np[i]) for i in range(6)]
     elif action_mode == "relative":
-        target_joints = [float(state_np[i] + action_np[i]) for i in range(6)]
+        target_joints = [float(state_np[i] + action_np[i] / action_delta_scale) for i in range(6)]
     else:
         raise ValueError(f"Unknown action_mode {action_mode!r}; expected 'absolute' or 'relative'.")
 
@@ -204,8 +206,14 @@ def parse_args():
                    help="Print current state, predicted action, and delta every tick.")
     p.add_argument("--action-mode", choices=["absolute", "relative"], default="relative",
                    help="MUST match the converter's ACTION_MODE. 'relative' (default): "
-                        "policy outputs per-tick joint deltas; we add to current state before "
-                        "sending. 'absolute': policy outputs joint targets directly.")
+                        "policy outputs scaled per-tick joint deltas; we divide by "
+                        "--action-delta-scale, then add to current state before sending. "
+                        "'absolute': policy outputs joint targets directly.")
+    p.add_argument("--action-delta-scale", type=float, default=100.0,
+                   help="In relative mode, the policy was trained on (delta * SCALE) values; "
+                        "we divide its output by this same SCALE before adding to current "
+                        "joint state. MUST match ACTION_DELTA_SCALE in convert_local.py. "
+                        "Default: 100.0")
     return p.parse_args()
 
 
@@ -251,7 +259,7 @@ def main():
         action_np = action[0].cpu().numpy()
 
         cur_state = obs["observation.state"][0].cpu().numpy()
-        target_joints, gripper_amp = resolve_targets(action_np, cur_state, args.action_mode)
+        target_joints, gripper_amp = resolve_targets(action_np, cur_state, args.action_mode, args.action_delta_scale)
         print("\n=== Dry-run prediction ===")
         print(f"  action_mode:      {args.action_mode}")
         print(f"  current state:    {np.round(cur_state, 3)}")
@@ -313,7 +321,7 @@ def main():
             action_np = action[0].cpu().numpy()
             state_np = obs["observation.state"][0].cpu().numpy()
 
-            target_joints, gripper_amp = resolve_targets(action_np, state_np, args.action_mode)
+            target_joints, gripper_amp = resolve_targets(action_np, state_np, args.action_mode, args.action_delta_scale)
             gripper_sent, _ = send_action(target_joints, gripper_amp, lebai)
 
             step += 1

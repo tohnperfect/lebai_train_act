@@ -39,8 +39,8 @@ def parse_args():
                    default=Path("./result"),
                    help="Directory used as HF_LEROBOT_HOME. The dataset must live "
                         "at <dataset-path>/<repo-id>/. Default: ./result")
-    p.add_argument("--repo-id", default="local/lebai_duck_pick_delta",
-                   help="Dataset repo id under HF_LEROBOT_HOME. Default: local/lebai_duck_pick_delta")
+    p.add_argument("--repo-id", default="local/lebai_duck_pick_delta_x100",
+                   help="Dataset repo id under HF_LEROBOT_HOME. Default: local/lebai_duck_pick_delta_x100")
     p.add_argument("--checkpoint-dir", type=Path, default=Path("./checkpoints/act_run01"),
                    help="Where to save step_* and final/ checkpoints. Default: ./checkpoints/act_run01")
     p.add_argument("--chunk-size", type=int, default=32,

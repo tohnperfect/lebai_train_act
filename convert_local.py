@@ -43,7 +43,24 @@ except ImportError:
 RUN_NUMBER = None                       # int to pick one log<NNNN>, None to merge all
 ACTION_MODE = "relative"                # "absolute" = joint targets in rad
                                         # "relative" = delta-joint per tick in rad (recommended)
-REPO_ID = "local/lebai_duck_pick_delta" if ACTION_MODE == "relative" else "local/lebai_duck_pick"
+
+# When ACTION_MODE == "relative", multiply raw per-tick joint deltas by this
+# factor before saving to the dataset. Raw 10 Hz deltas are typically ±0.05 rad,
+# which trains slowly because the targets are tiny — scaling by 20× puts them
+# in roughly ±1.0, a much better range for the policy network. The gripper
+# dimension is left alone (it's an absolute 0–100 value, not a delta).
+#
+# At inference, run_inference.py divides the policy's predicted delta by this
+# same factor before adding it to the current joint state. Converter + inference
+# values MUST match; if you change it here, change ACTION_DELTA_SCALE in
+# run_inference.py too.
+ACTION_DELTA_SCALE = 100.0
+
+if ACTION_MODE == "relative":
+    REPO_ID = f"local/lebai_duck_pick_delta_x{int(ACTION_DELTA_SCALE)}"
+else:
+    REPO_ID = "local/lebai_duck_pick"
+
 INCLUDE_WRIST = True                    # auto-disabled if no wrist data is present
 INCLUDE_GRIPPER = True
 FPS = 10
@@ -61,13 +78,15 @@ def build_state(row):
 
 
 def build_action(row, next_row):
-    """First 6 dims = joint commands (absolute targets OR per-tick deltas, per ACTION_MODE).
+    """First 6 dims = joint commands (absolute targets OR scaled per-tick deltas, per ACTION_MODE).
     Last dim (if INCLUDE_GRIPPER) = next-frame gripper amplitude, always absolute (0–100).
     """
     if ACTION_MODE == "relative":
         # Action is the per-tick joint delta: next_jp - current_jp (radians).
         # At the last frame of an episode next_row == row, so delta = 0 (stay still).
-        joints = [float(next_row[f"jp{i}"] - row[f"jp{i}"]) for i in range(6)]
+        # Multiply by ACTION_DELTA_SCALE so the network sees roughly ±1 values
+        # instead of ±0.05 — easier to learn, less affected by float precision.
+        joints = [float((next_row[f"jp{i}"] - row[f"jp{i}"]) * ACTION_DELTA_SCALE) for i in range(6)]
     elif ACTION_MODE == "absolute":
         tgt = [row.get(f"tgt_jp{i}") for i in range(6)]
         if any(pd.isna(v) for v in tgt):
