@@ -6,10 +6,18 @@ Run from the repo root:
     python convert_local.py
 """
 
+import logging
 import os
 import shutil
 import sys
 from pathlib import Path
+
+# Surface errors from lerobot's image writer (it logger.error()s and otherwise
+# swallows them, which makes silent flush failures look like FileNotFoundError
+# from compute_episode_stats. Make those visible so we can see what's going wrong.
+logging.basicConfig(level=logging.WARNING,
+                    format="[%(levelname)s] %(name)s: %(message)s")
+logging.getLogger("lerobot.datasets.image_writer").setLevel(logging.DEBUG)
 
 REPO_ROOT = Path(__file__).resolve().parent
 LOG_ROOT = REPO_ROOT / "Data"
@@ -33,7 +41,9 @@ except ImportError:
 # Configuration --------------------------------------------------------------
 
 RUN_NUMBER = None                       # int to pick one log<NNNN>, None to merge all
-REPO_ID = "local/lebai_duck_pick"
+ACTION_MODE = "relative"                # "absolute" = joint targets in rad
+                                        # "relative" = delta-joint per tick in rad (recommended)
+REPO_ID = "local/lebai_duck_pick_delta" if ACTION_MODE == "relative" else "local/lebai_duck_pick"
 INCLUDE_WRIST = True                    # auto-disabled if no wrist data is present
 INCLUDE_GRIPPER = True
 FPS = 10
@@ -51,15 +61,26 @@ def build_state(row):
 
 
 def build_action(row, next_row):
-    tgt = [row.get(f"tgt_jp{i}") for i in range(6)]
-    if any(pd.isna(v) for v in tgt):
-        tgt = [float(next_row[f"jp{i}"]) for i in range(6)]
+    """First 6 dims = joint commands (absolute targets OR per-tick deltas, per ACTION_MODE).
+    Last dim (if INCLUDE_GRIPPER) = next-frame gripper amplitude, always absolute (0–100).
+    """
+    if ACTION_MODE == "relative":
+        # Action is the per-tick joint delta: next_jp - current_jp (radians).
+        # At the last frame of an episode next_row == row, so delta = 0 (stay still).
+        joints = [float(next_row[f"jp{i}"] - row[f"jp{i}"]) for i in range(6)]
+    elif ACTION_MODE == "absolute":
+        tgt = [row.get(f"tgt_jp{i}") for i in range(6)]
+        if any(pd.isna(v) for v in tgt):
+            joints = [float(next_row[f"jp{i}"]) for i in range(6)]
+        else:
+            joints = [float(v) for v in tgt]
     else:
-        tgt = [float(v) for v in tgt]
+        raise ValueError(f"ACTION_MODE must be 'absolute' or 'relative', got {ACTION_MODE!r}")
+
     if INCLUDE_GRIPPER:
         amp = next_row.get("claw_amplitude", row.get("claw_amplitude", 0.0))
-        tgt.append(float(amp) if pd.notna(amp) else 0.0)
-    return np.array(tgt, dtype=np.float32)
+        joints.append(float(amp) if pd.notna(amp) else 0.0)
+    return np.array(joints, dtype=np.float32)
 
 
 def load_rgb(run_dir, rel_path):
@@ -124,11 +145,16 @@ def main():
         robot_type="lebai_lm3",
         fps=FPS,
         features=features,
-        image_writer_threads=4,
-        image_writer_processes=2,
+        # threads=0 / processes=0 disables image writes entirely in lerobot 0.5.1.
+        # We need at least one worker. On 8 GB M1, 4 threads + 2 processes OOM'd —
+        # 2 threads with no subprocess uses much less memory. Combined with the
+        # explicit wait_until_done() drain below, conversion stays reliable.
+        # Raise these on larger machines for speed.
+        image_writer_threads=2,
+        image_writer_processes=0,
     )
     print(f"Created empty dataset at {out_path}")
-    print(f"  state_dim={state_dim}  action_dim={action_dim}  wrist={has_wrist_data}")
+    print(f"  state_dim={state_dim}  action_dim={action_dim}  wrist={has_wrist_data}  action_mode={ACTION_MODE}")
 
     # 5. Conversion loop
     total_frames = 0
@@ -148,6 +174,10 @@ def main():
             continue
 
         desc = f"{src_name} [{task[:30]}]"
+        # Drain the writer queue every DRAIN_EVERY frames so it can't grow
+        # unbounded — without this, on 8 GB M1 we OOM mid-episode at ~1000 frames.
+        DRAIN_EVERY = 200
+        iw = getattr(dataset.writer, "image_writer", None)
         for i in tqdm(range(len(ep_df)), desc=desc, leave=False):
             row = ep_df.iloc[i]
             next_row = ep_df.iloc[i + 1] if i + 1 < len(ep_df) else row
@@ -160,6 +190,13 @@ def main():
             if has_wrist_data and isinstance(row["wrist"], str) and row["wrist"]:
                 frame["observation.images.wrist"] = load_rgb(row["__run_dir__"], row["wrist"])
             dataset.add_frame(frame)
+            if iw is not None and (i + 1) % DRAIN_EVERY == 0:
+                iw.wait_until_done()
+
+        # Final drain before save_episode — its compute_episode_stats reads
+        # the PNGs back synchronously, so they must all be on disk.
+        if iw is not None:
+            iw.wait_until_done()
 
         dataset.save_episode()
         total_episodes += 1

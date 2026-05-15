@@ -1,0 +1,24 @@
+# Pinned dependencies for local-GPU training (Linux x86_64 with CUDA 12.x).
+# Versions tested against the rest of this repo as of May 2026.
+#
+# Usage:
+#     python3.10 -m venv .venv
+#     source .venv/bin/activate
+#     pip install --upgrade pip
+#     pip install -r requirements_gpu.txt
+#
+# For CUDA 11.8 instead of 12.x, prepend the install with:
+#     pip install --index-url https://download.pytorch.org/whl/cu118 torch torchvision
+# then run pip install -r requirements_gpu.txt as normal — it will skip torch.
+
+# Core training (lerobot pulls in torch 2.10, datasets, accelerate, etc.)
+lerobot==0.5.1
+
+# Data prep + display
+pandas>=2.0
+opencv-python>=4.8
+tqdm>=4.65
+matplotlib>=3.7
+
+# Notebook support (optional — only needed if you also want to open the .ipynb)
+jupyter>=1.0

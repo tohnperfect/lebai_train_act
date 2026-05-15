@@ -140,15 +140,34 @@ def build_observation(policy, cam, lebai, base_cid, wrist_cid, expected_keys, de
 
 _last_gripper_sent = None
 
-def send_action(action_np, lebai):
-    """First 6 dims = joint targets (rad). Last dim (if 7) = gripper amplitude.
+def resolve_targets(action_np, state_np, action_mode):
+    """Convert a policy action into absolute joint targets and (optionally) a gripper amplitude.
 
-    Returns (gripper_amp, gripper_sent_flag) so the caller can report whether
-    the gripper command was sent or rate-limited.
+    action_mode = 'absolute' -> action[0..5] are the joint targets themselves (rad).
+    action_mode = 'relative' -> action[0..5] are per-tick deltas; add to current state.
+    Gripper (action[6]) is always absolute (0–100).
+    """
+    if action_mode == "absolute":
+        target_joints = [float(action_np[i]) for i in range(6)]
+    elif action_mode == "relative":
+        target_joints = [float(state_np[i] + action_np[i]) for i in range(6)]
+    else:
+        raise ValueError(f"Unknown action_mode {action_mode!r}; expected 'absolute' or 'relative'.")
+
+    gripper_amp = None
+    if len(action_np) >= 7:
+        gripper_amp = float(np.clip(action_np[6], 0.0, 100.0))
+    return target_joints, gripper_amp
+
+
+def send_action(target_joints, gripper_amp, lebai):
+    """target_joints is always absolute joint positions (rad). gripper_amp in [0, 100] or None.
+
+    Returns (gripper_sent_flag, gripper_amp) so the caller can report whether the
+    gripper command was actually sent or rate-limited.
     """
     global _last_gripper_sent
 
-    target_joints = [float(x) for x in action_np[:6]]
     lebai.movej(
         target_joints,
         JOINT_ACC_LIMIT, JOINT_VEL_LIMIT,
@@ -156,16 +175,14 @@ def send_action(action_np, lebai):
         BLEND_RADIUS,
     )
 
-    gripper_amp = None
     gripper_sent = False
-    if len(action_np) >= 7:
-        gripper_amp = float(np.clip(action_np[6], 0.0, 100.0))
+    if gripper_amp is not None:
         if (_last_gripper_sent is None
                 or abs(gripper_amp - _last_gripper_sent) > GRIPPER_THRESHOLD):
             lebai.set_claw(GRIPPER_FORCE, gripper_amp)
             _last_gripper_sent = gripper_amp
             gripper_sent = True
-    return gripper_amp, gripper_sent
+    return gripper_sent, gripper_amp
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +202,10 @@ def parse_args():
                    help="Predict one action and print it, but do NOT send to the robot.")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Print current state, predicted action, and delta every tick.")
+    p.add_argument("--action-mode", choices=["absolute", "relative"], default="relative",
+                   help="MUST match the converter's ACTION_MODE. 'relative' (default): "
+                        "policy outputs per-tick joint deltas; we add to current state before "
+                        "sending. 'absolute': policy outputs joint targets directly.")
     return p.parse_args()
 
 
@@ -230,12 +251,18 @@ def main():
         action_np = action[0].cpu().numpy()
 
         cur_state = obs["observation.state"][0].cpu().numpy()
+        target_joints, gripper_amp = resolve_targets(action_np, cur_state, args.action_mode)
         print("\n=== Dry-run prediction ===")
-        print(f"  current state: {np.round(cur_state, 3)}")
+        print(f"  action_mode:      {args.action_mode}")
+        print(f"  current state:    {np.round(cur_state, 3)}")
         print(f"  predicted action: {np.round(action_np, 3)}")
-        print(f"  delta (action - state): {np.round(action_np - cur_state, 4)}")
-        if len(action_np) >= 7:
-            print(f"  gripper amplitude: {action_np[6]:.1f}")
+        if args.action_mode == "relative":
+            print(f"  -> abs target:    {np.round(target_joints + [gripper_amp if gripper_amp is not None else 0], 3)}")
+            print(f"     (action[0..5] is the per-tick joint delta in rad)")
+        else:
+            print(f"  delta (target - state): {np.round(np.array(target_joints) - cur_state[:6], 4)}")
+        if gripper_amp is not None:
+            print(f"  gripper amplitude: {gripper_amp:.1f}")
 
         if args.dry_run:
             print("\n--dry-run set, exiting without moving the robot.")
@@ -286,28 +313,29 @@ def main():
             action_np = action[0].cpu().numpy()
             state_np = obs["observation.state"][0].cpu().numpy()
 
-            gripper_amp, gripper_sent = send_action(action_np, lebai)
+            target_joints, gripper_amp = resolve_targets(action_np, state_np, args.action_mode)
+            gripper_sent, _ = send_action(target_joints, gripper_amp, lebai)
 
             step += 1
             log_now = args.verbose or (step % 10 == 0)
             if log_now:
                 loop_ms = (time.time() - loop_t) * 1000
                 if args.verbose:
-                    delta = action_np - state_np
                     print(f"  t={loop_t - t_start:5.1f}s  step={step:4d}  loop={loop_ms:.0f}ms")
-                    print(f"    state : {np.round(state_np[:6], 3)}    "
+                    print(f"    state    : {np.round(state_np[:6], 3)}    "
                           f"gripper={state_np[6]:5.1f}" if len(state_np) >= 7
-                          else f"    state : {np.round(state_np[:6], 3)}")
-                    print(f"    action: {np.round(action_np[:6], 3)}    "
+                          else f"    state    : {np.round(state_np[:6], 3)}")
+                    action_label = "delta" if args.action_mode == "relative" else "action"
+                    print(f"    {action_label}    : {np.round(action_np[:6], 4)}")
+                    print(f"    abs targ : {np.round(target_joints, 3)}    "
                           f"gripper={gripper_amp:5.1f} {'(SENT)' if gripper_sent else '(rate-limited)'}"
                           if gripper_amp is not None else
-                          f"    action: {np.round(action_np[:6], 3)}")
-                    print(f"    delta : {np.round(delta[:6], 4)}")
+                          f"    abs targ : {np.round(target_joints, 3)}")
                 else:
                     msg = (f"  t={loop_t - t_start:5.1f}s  step={step:4d}  "
-                           f"loop={loop_ms:.0f}ms  j={np.round(action_np[:6], 2)}")
-                    if len(action_np) >= 7:
-                        msg += f"  g={action_np[6]:.0f}"
+                           f"loop={loop_ms:.0f}ms  tgt={np.round(target_joints, 2)}")
+                    if gripper_amp is not None:
+                        msg += f"  g={gripper_amp:.0f}"
                     print(msg)
 
             next_tick += PERIOD_S

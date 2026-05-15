@@ -15,7 +15,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 RESULT_ROOT = REPO_ROOT / "result"
-REPO_ID = "local/lebai_duck_pick"
+# Must match REPO_ID in convert_local.py
+REPO_ID = "local/lebai_duck_pick_delta"
 
 os.environ["HF_LEROBOT_HOME"] = str(RESULT_ROOT)
 
