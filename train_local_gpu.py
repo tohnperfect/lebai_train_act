@@ -172,10 +172,15 @@ def main():
             dim_feedforward=3200,
             n_encoder_layers=4,
             n_decoder_layers=1,    # original ACT impl uses 1, not 7 from the paper
-            use_vae=True,
+            # CVAE disabled: previous run at kl_weight=10.0 collapsed the latent to 0
+            # by step 5000 and the decoder learned to output the data mean.
+            # use_vae=False makes ACT a deterministic transformer over action chunks —
+            # fine for single-task / unimodal demos like duck-in-bowl. To re-enable,
+            # set use_vae=True with kl_weight=1.0 (NOT 10.0).
+            use_vae=False,
             latent_dim=32,
             n_vae_encoder_layers=4,
-            kl_weight=10.0,
+            kl_weight=1.0,
             dropout=0.1,
         )
         cfg.input_features = input_features
