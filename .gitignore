@@ -6,3 +6,4 @@ checkpoints/
 .vscode/
 act_run01/
 act_run02/
+UPDATE_PROMPT_diffusion_policy.md
